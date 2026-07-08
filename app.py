@@ -1,26 +1,10 @@
 """
-OrientCI — backend Flask
-=========================
-Sert le site statique (templates/index.html + static/), enregistre les
-évènements de trafic envoyés par script.js dans une base PostgreSQL (Neon),
-et expose une page d'administration protégée par mot de passe pour consulter
-les statistiques (visites, filières consultées, recherches, bourses cliquées).
-
-Lancement local :
-    pip install -r requirements.txt
-    python app.py
-Le site est alors disponible sur http://127.0.0.1:5000
-L'administration est sur http://127.0.0.1:5000/admin (identifiants ci-dessous).
-
-IMPORTANT — SÉCURITÉ :
-Les identifiants admin par défaut (admin / orientci2026) sont volontairement
-simples pour la démo. Avant toute mise en ligne publique, définis de vraies
-valeurs via les variables d'environnement ADMIN_USERNAME, ADMIN_PASSWORD et
-SECRET_KEY (voir README.md).
+OrientCI — backend Flask (Version finale robuste + diagnostic)
 """
 
 import os
 import hashlib
+import traceback
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 
@@ -29,7 +13,6 @@ from flask import Flask, request, jsonify, session, redirect, url_for, render_te
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
-# Charger les variables d'environnement depuis .env (si présent)
 load_dotenv()
 
 app = Flask(__name__)
@@ -38,22 +21,20 @@ app.secret_key = os.environ.get("SECRET_KEY", "orientci-dev-secret-change-me")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "orientci2026")
 
-# État de la base de données
 _db_engine = None
 _db_ready = False
 
 
 # ---------------------------------------------------------------------------
-# Gestion de la base de données (lazy initialization)
+# Gestion de la base (lazy)
 # ---------------------------------------------------------------------------
 
 def get_engine():
-    """Retourne le moteur SQLAlchemy, en le créant si nécessaire."""
     global _db_engine
     if _db_engine is None:
         database_url = os.environ.get("DATABASE_URL")
         if not database_url:
-            raise RuntimeError("La variable d'environnement DATABASE_URL n'est pas définie.")
+            raise RuntimeError("DATABASE_URL non définie")
         _db_engine = create_engine(
             database_url,
             pool_pre_ping=True,
@@ -63,7 +44,6 @@ def get_engine():
 
 
 def init_db():
-    """Crée la table events si elle n'existe pas."""
     engine = get_engine()
     with engine.begin() as conn:
         conn.execute(
@@ -84,29 +64,23 @@ def init_db():
 
 
 def ensure_db_ready():
-    """Vérifie que la base est accessible et initialisée. Met à jour _db_ready."""
     global _db_ready
     if _db_ready:
         return True
     try:
         init_db()
         _db_ready = True
-        print("✅ Base de données PostgreSQL connectée et prête.")
+        print("✅ Base PostgreSQL connectée")
         return True
     except Exception as e:
-        print(f"⚠️ Erreur d'initialisation de la base : {e}")
+        print(f"❌ Erreur init DB : {e}")
+        traceback.print_exc()
         _db_ready = False
         return False
 
 
 @app.before_request
 def before_request():
-    """Initialise la base avant chaque requête (si ce n'est pas déjà fait)."""
-    # Ne pas bloquer l'accès aux pages d'administration (login) pour permettre
-    # de se connecter même si la base est en panne ? Mais on laisse l'erreur
-    # s'afficher sur les pages qui en ont besoin. On appelle ensure_db_ready()
-    # mais on ne bloque pas ; chaque route gérera elle-même l'erreur.
-    # On peut cependant forcer l'initialisation ici.
     ensure_db_ready()
 
 
@@ -115,25 +89,28 @@ def before_request():
 # ---------------------------------------------------------------------------
 
 def hash_ip(ip):
-    """Hash l'IP pour l'anonymiser."""
     if not ip:
         return ""
     return hashlib.sha256(ip.encode("utf-8")).hexdigest()[:16]
 
 
 def require_db(f):
-    """Décorateur pour vérifier que la base est prête avant d'exécuter la route."""
     @wraps(f)
     def wrapped(*args, **kwargs):
         if not ensure_db_ready():
-            return jsonify({"error": "Service de base de données indisponible"}), 503
-        return f(*args, **kwargs)
+            return jsonify({"error": "Base de données indisponible"}), 503
+        try:
+            return f(*args, **kwargs)
+        except SQLAlchemyError as e:
+            print(f"❌ SQLAlchemyError dans {f.__name__}: {e}")
+            traceback.print_exc()
+            return jsonify({"error": f"Erreur base de données : {str(e)}"}), 500
+        except Exception as e:
+            print(f"❌ Exception inattendue dans {f.__name__}: {e}")
+            traceback.print_exc()
+            return jsonify({"error": f"Erreur interne : {str(e)}"}), 500
     return wrapped
 
-
-# ---------------------------------------------------------------------------
-# Authentification admin
-# ---------------------------------------------------------------------------
 
 def login_required(view):
     @wraps(view)
@@ -145,7 +122,51 @@ def login_required(view):
 
 
 # ---------------------------------------------------------------------------
-# Routes publiques
+# ROUTES DE DIAGNOSTIC (ajoutées)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/health")
+def health():
+    """Vérifie la connexion à la base de données."""
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT 1")).fetchone()
+        return jsonify({
+            "status": "ok",
+            "database": "connected",
+            "test_query": result[0] if result else None
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "type": type(e).__name__
+        }), 500
+
+
+@app.route("/debug")
+def debug():
+    """Affiche des infos sur l'environnement (sans exposer le mot de passe complet)."""
+    db_url = os.environ.get("DATABASE_URL", "ABSENTE")
+    # Masquer le mot de passe pour la sécurité
+    if db_url and ":" in db_url:
+        parts = db_url.split("@")
+        if len(parts) == 2:
+            db_url = parts[0][:20] + "...@" + parts[1]
+    return jsonify({
+        "python_version": __import__('sys').version,
+        "cwd": os.getcwd(),
+        "database_url_defined": bool(os.environ.get("DATABASE_URL")),
+        "database_url_preview": db_url,
+        "sqlalchemy_version": __import__('sqlalchemy').__version__,
+        "db_ready": _db_ready,
+        "admin_username": ADMIN_USERNAME,
+    })
+
+
+# ---------------------------------------------------------------------------
+# ROUTES PRINCIPALES
 # ---------------------------------------------------------------------------
 
 @app.route("/")
@@ -183,10 +204,6 @@ def track():
     return jsonify({"ok": True}), 204
 
 
-# ---------------------------------------------------------------------------
-# Administration
-# ---------------------------------------------------------------------------
-
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
     error = None
@@ -222,25 +239,24 @@ def admin_stats():
     with engine.connect() as conn:
         total_visits = conn.execute(
             text("SELECT COUNT(*) AS c FROM events WHERE type = 'pageview'")
-        ).fetchone()["c"]
+        ).fetchone()[0]
 
         visits_today = conn.execute(
             text("SELECT COUNT(*) AS c FROM events WHERE type = 'pageview' AND DATE(created_at) = :today"),
             {"today": today.isoformat()}
-        ).fetchone()["c"]
+        ).fetchone()[0]
 
         unique_visitors = conn.execute(
             text("SELECT COUNT(DISTINCT ip_hash) AS c FROM events WHERE type = 'pageview'")
-        ).fetchone()["c"]
+        ).fetchone()[0]
 
-        # Visites des 14 derniers jours
         days = []
         for i in range(13, -1, -1):
             d = (today - timedelta(days=i)).isoformat()
             count = conn.execute(
                 text("SELECT COUNT(*) AS c FROM events WHERE type = 'pageview' AND DATE(created_at) = :day"),
                 {"day": d}
-            ).fetchone()["c"]
+            ).fetchone()[0]
             days.append({"date": d, "count": count})
 
         def top(event_type, limit=8):
@@ -255,7 +271,7 @@ def admin_stats():
                 """),
                 {"event_type": event_type, "limit": limit}
             ).fetchall()
-            return [{"label": r["label"], "count": r["c"]} for r in rows]
+            return [{"label": r[0], "count": r[1]} for r in rows]
 
         recent_rows = conn.execute(
             text("""
@@ -265,7 +281,7 @@ def admin_stats():
                 LIMIT 30
             """)
         ).fetchall()
-        recent = [dict(r._mapping) for r in recent_rows]
+        recent = [{"type": r[0], "label": r[1], "value": r[2], "path": r[3], "created_at": r[4]} for r in recent_rows]
 
     return jsonify({
         "total_visits": total_visits,
@@ -286,17 +302,11 @@ def admin_stats():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # En local, on force l'initialisation pour être sûr
     ensure_db_ready()
     print("=" * 62)
     print(" OrientCI — serveur de developpement")
     print(" Site public :  http://127.0.0.1:5000")
     print(" Administration : http://127.0.0.1:5000/admin")
-    print(f" Identifiants admin par defaut : {ADMIN_USERNAME} / {ADMIN_PASSWORD}")
-    print(" -> A CHANGER avant toute mise en ligne (voir README.md)")
+    print(f" Identifiants admin : {ADMIN_USERNAME} / {ADMIN_PASSWORD}")
     print("=" * 62)
     app.run(debug=True, port=5000)
-else:
-    # En environnement serveur (Vercel), l'initialisation sera faite à la
-    # première requête via before_request. On ne fait rien ici.
-    pass
