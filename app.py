@@ -1,5 +1,5 @@
 """
-OrientCI — backend Flask (Version finale robuste + diagnostic)
+OrientCI — backend Flask (Version définitive – corrige l'erreur de connexion fermée)
 """
 
 import os
@@ -122,12 +122,11 @@ def login_required(view):
 
 
 # ---------------------------------------------------------------------------
-# ROUTES DE DIAGNOSTIC (ajoutées)
+# ROUTES DE DIAGNOSTIC
 # ---------------------------------------------------------------------------
 
 @app.route("/api/health")
 def health():
-    """Vérifie la connexion à la base de données."""
     try:
         engine = get_engine()
         with engine.connect() as conn:
@@ -147,9 +146,7 @@ def health():
 
 @app.route("/debug")
 def debug():
-    """Affiche des infos sur l'environnement (sans exposer le mot de passe complet)."""
     db_url = os.environ.get("DATABASE_URL", "ABSENTE")
-    # Masquer le mot de passe pour la sécurité
     if db_url and ":" in db_url:
         parts = db_url.split("@")
         if len(parts) == 2:
@@ -236,44 +233,102 @@ def admin_stats():
     today = datetime.now(timezone.utc).date()
     engine = get_engine()
 
-    with engine.connect() as conn:
+    # Utilisation de engine.begin() pour garantir une transaction active
+    # et éviter la fermeture prématurée de la connexion
+    with engine.begin() as conn:
+        # Total des visites
         total_visits = conn.execute(
             text("SELECT COUNT(*) AS c FROM events WHERE type = 'pageview'")
-        ).fetchone()[0]
+        ).scalar()
 
+        # Visites du jour
         visits_today = conn.execute(
             text("SELECT COUNT(*) AS c FROM events WHERE type = 'pageview' AND DATE(created_at) = :today"),
             {"today": today.isoformat()}
-        ).fetchone()[0]
+        ).scalar()
 
+        # Visiteurs uniques
         unique_visitors = conn.execute(
             text("SELECT COUNT(DISTINCT ip_hash) AS c FROM events WHERE type = 'pageview'")
-        ).fetchone()[0]
+        ).scalar()
 
+        # 14 derniers jours
         days = []
         for i in range(13, -1, -1):
             d = (today - timedelta(days=i)).isoformat()
             count = conn.execute(
                 text("SELECT COUNT(*) AS c FROM events WHERE type = 'pageview' AND DATE(created_at) = :day"),
                 {"day": d}
-            ).fetchone()[0]
+            ).scalar()
             days.append({"date": d, "count": count})
 
-        def top(event_type, limit=8):
-            rows = conn.execute(
-                text("""
-                    SELECT label, COUNT(*) AS c
-                    FROM events
-                    WHERE type = :event_type AND label != ''
-                    GROUP BY label
-                    ORDER BY c DESC
-                    LIMIT :limit
-                """),
-                {"event_type": event_type, "limit": limit}
-            ).fetchall()
-            return [{"label": r[0], "count": r[1]} for r in rows]
+        # Top écoles
+        rows = conn.execute(
+            text("""
+                SELECT label, COUNT(*) AS c
+                FROM events
+                WHERE type = 'school_open' AND label != ''
+                GROUP BY label
+                ORDER BY c DESC
+                LIMIT 8
+            """)
+        ).fetchall()
+        top_schools = [{"label": r[0], "count": r[1]} for r in rows]
 
-        recent_rows = conn.execute(
+        # Top liens officiels
+        rows = conn.execute(
+            text("""
+                SELECT label, COUNT(*) AS c
+                FROM events
+                WHERE type = 'official_link_click' AND label != ''
+                GROUP BY label
+                ORDER BY c DESC
+                LIMIT 8
+            """)
+        ).fetchall()
+        top_official_links = [{"label": r[0], "count": r[1]} for r in rows]
+
+        # Top recherches
+        rows = conn.execute(
+            text("""
+                SELECT label, COUNT(*) AS c
+                FROM events
+                WHERE type = 'search' AND label != ''
+                GROUP BY label
+                ORDER BY c DESC
+                LIMIT 8
+            """)
+        ).fetchall()
+        top_searches = [{"label": r[0], "count": r[1]} for r in rows]
+
+        # Top filtres ville
+        rows = conn.execute(
+            text("""
+                SELECT label, COUNT(*) AS c
+                FROM events
+                WHERE type = 'city_filter' AND label != ''
+                GROUP BY label
+                ORDER BY c DESC
+                LIMIT 8
+            """)
+        ).fetchall()
+        top_city_filters = [{"label": r[0], "count": r[1]} for r in rows]
+
+        # Top bourses cliquées
+        rows = conn.execute(
+            text("""
+                SELECT label, COUNT(*) AS c
+                FROM events
+                WHERE type = 'scholarship_click' AND label != ''
+                GROUP BY label
+                ORDER BY c DESC
+                LIMIT 8
+            """)
+        ).fetchall()
+        top_scholarships = [{"label": r[0], "count": r[1]} for r in rows]
+
+        # Événements récents
+        rows = conn.execute(
             text("""
                 SELECT type, label, value, path, created_at
                 FROM events
@@ -281,18 +336,18 @@ def admin_stats():
                 LIMIT 30
             """)
         ).fetchall()
-        recent = [{"type": r[0], "label": r[1], "value": r[2], "path": r[3], "created_at": r[4]} for r in recent_rows]
+        recent = [{"type": r[0], "label": r[1], "value": r[2], "path": r[3], "created_at": r[4]} for r in rows]
 
     return jsonify({
         "total_visits": total_visits,
         "visits_today": visits_today,
         "unique_visitors": unique_visitors,
         "daily_visits": days,
-        "top_schools": top("school_open"),
-        "top_official_links": top("official_link_click"),
-        "top_searches": top("search"),
-        "top_city_filters": top("city_filter"),
-        "top_scholarships": top("scholarship_click"),
+        "top_schools": top_schools,
+        "top_official_links": top_official_links,
+        "top_searches": top_searches,
+        "top_city_filters": top_city_filters,
+        "top_scholarships": top_scholarships,
         "recent_events": recent,
     })
 
