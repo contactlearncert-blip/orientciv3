@@ -27,22 +27,10 @@ from functools import wraps
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, session, redirect, url_for, render_template, g
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 
 # Charger les variables d'environnement depuis .env (si présent)
 load_dotenv()
-
-# Base de données PostgreSQL via Neon
-DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("La variable d'environnement DATABASE_URL n'est pas définie.")
-
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    future=True
-)
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "orientci-dev-secret-change-me")
@@ -50,13 +38,33 @@ app.secret_key = os.environ.get("SECRET_KEY", "orientci-dev-secret-change-me")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "orientci2026")
 
+# État de la base de données
+_db_engine = None
+_db_ready = False
+
 
 # ---------------------------------------------------------------------------
-# Base de données
+# Gestion de la base de données (lazy initialization)
 # ---------------------------------------------------------------------------
+
+def get_engine():
+    """Retourne le moteur SQLAlchemy, en le créant si nécessaire."""
+    global _db_engine
+    if _db_engine is None:
+        database_url = os.environ.get("DATABASE_URL")
+        if not database_url:
+            raise RuntimeError("La variable d'environnement DATABASE_URL n'est pas définie.")
+        _db_engine = create_engine(
+            database_url,
+            pool_pre_ping=True,
+            future=True
+        )
+    return _db_engine
+
 
 def init_db():
     """Crée la table events si elle n'existe pas."""
+    engine = get_engine()
     with engine.begin() as conn:
         conn.execute(
             text("""
@@ -75,17 +83,56 @@ def init_db():
         )
 
 
+def ensure_db_ready():
+    """Vérifie que la base est accessible et initialisée. Met à jour _db_ready."""
+    global _db_ready
+    if _db_ready:
+        return True
+    try:
+        init_db()
+        _db_ready = True
+        print("✅ Base de données PostgreSQL connectée et prête.")
+        return True
+    except Exception as e:
+        print(f"⚠️ Erreur d'initialisation de la base : {e}")
+        _db_ready = False
+        return False
+
+
+@app.before_request
+def before_request():
+    """Initialise la base avant chaque requête (si ce n'est pas déjà fait)."""
+    # Ne pas bloquer l'accès aux pages d'administration (login) pour permettre
+    # de se connecter même si la base est en panne ? Mais on laisse l'erreur
+    # s'afficher sur les pages qui en ont besoin. On appelle ensure_db_ready()
+    # mais on ne bloque pas ; chaque route gérera elle-même l'erreur.
+    # On peut cependant forcer l'initialisation ici.
+    ensure_db_ready()
+
+
+# ---------------------------------------------------------------------------
+# Utilitaires
+# ---------------------------------------------------------------------------
+
 def hash_ip(ip):
-    """On ne stocke jamais l'IP en clair : seulement un hash tronqué,
-    suffisant pour estimer les visiteurs uniques sans conserver de donnée
-    personnelle directement identifiante."""
+    """Hash l'IP pour l'anonymiser."""
     if not ip:
         return ""
     return hashlib.sha256(ip.encode("utf-8")).hexdigest()[:16]
 
 
+def require_db(f):
+    """Décorateur pour vérifier que la base est prête avant d'exécuter la route."""
+    @wraps(f)
+    def wrapped(*args, **kwargs):
+        if not ensure_db_ready():
+            return jsonify({"error": "Service de base de données indisponible"}), 503
+        return f(*args, **kwargs)
+    return wrapped
+
+
 # ---------------------------------------------------------------------------
-# Authentification admin (session simple)
+# Authentification admin
 # ---------------------------------------------------------------------------
 
 def login_required(view):
@@ -98,7 +145,7 @@ def login_required(view):
 
 
 # ---------------------------------------------------------------------------
-# Routes publiques : site + tracking
+# Routes publiques
 # ---------------------------------------------------------------------------
 
 @app.route("/")
@@ -107,6 +154,7 @@ def index():
 
 
 @app.route("/api/track", methods=["POST"])
+@require_db
 def track():
     data = request.get_json(silent=True) or {}
     event_type = str(data.get("type", "unknown"))[:50]
@@ -114,6 +162,7 @@ def track():
     value = str(data.get("value", ""))[:200]
     path = str(data.get("path", ""))[:200]
 
+    engine = get_engine()
     with engine.begin() as conn:
         conn.execute(
             text("""
@@ -165,8 +214,10 @@ def admin_dashboard():
 
 @app.route("/admin/api/stats")
 @login_required
+@require_db
 def admin_stats():
     today = datetime.now(timezone.utc).date()
+    engine = get_engine()
 
     with engine.connect() as conn:
         total_visits = conn.execute(
@@ -182,7 +233,7 @@ def admin_stats():
             text("SELECT COUNT(DISTINCT ip_hash) AS c FROM events WHERE type = 'pageview'")
         ).fetchone()["c"]
 
-        # Visites des 14 derniers jours (pour le graphique)
+        # Visites des 14 derniers jours
         days = []
         for i in range(13, -1, -1):
             d = (today - timedelta(days=i)).isoformat()
@@ -230,8 +281,13 @@ def admin_stats():
     })
 
 
+# ---------------------------------------------------------------------------
+# Lancement
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
-    init_db()
+    # En local, on force l'initialisation pour être sûr
+    ensure_db_ready()
     print("=" * 62)
     print(" OrientCI — serveur de developpement")
     print(" Site public :  http://127.0.0.1:5000")
@@ -241,5 +297,6 @@ if __name__ == "__main__":
     print("=" * 62)
     app.run(debug=True, port=5000)
 else:
-    # Cas d'un lancement via un serveur WSGI (gunicorn, etc.)
-    init_db()
+    # En environnement serveur (Vercel), l'initialisation sera faite à la
+    # première requête via before_request. On ne fait rien ici.
+    pass
