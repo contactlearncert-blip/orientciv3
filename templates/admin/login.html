@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OrientCI — Administration</title>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --color-bg: #FAF7F1; --color-surface: #FFFFFF; --color-ink: #201C18;
+      --color-ink-soft: #5B5650; --color-line: #E9E1D5;
+      --color-orange: #E85D0A; --color-orange-deep: #C24A05;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      background: var(--color-bg); font-family: "Inter", sans-serif; color: var(--color-ink);
+    }
+    .login-card {
+      background: var(--color-surface); border: 1px solid var(--color-line); border-radius: 18px;
+      padding: 40px 36px; width: 100%; max-width: 360px; box-shadow: 0 8px 24px rgba(32,28,24,0.06);
+    }
+    h1 { font-family: "Fraunces", serif; font-size: 1.4rem; margin: 0 0 6px; }
+    p.sub { color: var(--color-ink-soft); font-size: 0.9rem; margin: 0 0 24px; }
+    label { display: block; font-size: 0.82rem; font-weight: 600; margin-bottom: 6px; margin-top: 16px; }
+    input {
+      width: 100%; padding: 11px 14px; border-radius: 10px; border: 1.5px solid var(--color-line);
+      font-family: inherit; font-size: 0.95rem;
+    }
+    input:focus { outline: none; border-color: var(--color-orange); }
+    button {
+      margin-top: 24px; width: 100%; padding: 13px; border: none; border-radius: 999px;
+      background: var(--color-orange); color: #fff; font-weight: 600; font-size: 0.95rem; cursor: pointer;
+    }
+    button:hover { background: var(--color-orange-deep); }
+    .error { margin-top: 16px; background: #FDECDD; color: var(--color-orange-deep); padding: 10px 14px; border-radius: 10px; font-size: 0.85rem; }
+    .back { display: block; text-align: center; margin-top: 20px; font-size: 0.85rem; color: var(--color-ink-soft); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <h1>Administration OrientCI</h1>
+    <p class="sub">Connecte-toi pour consulter les statistiques de trafic du site.</p>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <form method="POST">
+      <label for="username">Identifiant</label>
+      <input type="text" id="username" name="username" autocomplete="username" required>
+      <label for="password">Mot de passe</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
+      <button type="submit">Se connecter</button>
+    </form>
+    <a class="back" href="/">← Retour au site</a>
+  </div>
+</body>
+</html>

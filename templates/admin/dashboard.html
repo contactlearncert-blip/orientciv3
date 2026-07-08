@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OrientCI — Tableau de bord</title>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --color-bg: #FAF7F1; --color-surface: #FFFFFF; --color-ink: #201C18;
+      --color-ink-soft: #5B5650; --color-line: #E9E1D5;
+      --color-orange: #E85D0A; --color-orange-deep: #C24A05; --color-orange-tint: #FDECDD;
+      --color-green: #14603F; --color-green-tint: #E4EFE7;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--color-bg); color: var(--color-ink); font-family: "Inter", sans-serif; }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 18px 28px; background: var(--color-surface); border-bottom: 1px solid var(--color-line);
+      position: sticky; top: 0;
+    }
+    header h1 { font-family: "Fraunces", serif; font-size: 1.2rem; margin: 0; }
+    header a { color: var(--color-ink-soft); font-size: 0.85rem; text-decoration: none; }
+    header a:hover { color: var(--color-orange-deep); }
+    main { max-width: 1100px; margin: 0 auto; padding: 28px; }
+
+    .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 28px; }
+    .stat-card { background: var(--color-surface); border: 1px solid var(--color-line); border-radius: 14px; padding: 18px 20px; }
+    .stat-card strong { display: block; font-family: "Fraunces", serif; font-size: 1.9rem; }
+    .stat-card span { font-size: 0.82rem; color: var(--color-ink-soft); }
+
+    .panel { background: var(--color-surface); border: 1px solid var(--color-line); border-radius: 14px; padding: 22px; margin-bottom: 24px; }
+    .panel h2 { font-family: "Fraunces", serif; font-size: 1.05rem; margin: 0 0 16px; }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    @media (max-width: 760px) { .grid-2 { grid-template-columns: 1fr; } }
+
+    .rank-list { display: flex; flex-direction: column; gap: 8px; }
+    .rank-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 0.88rem; }
+    .rank-label { color: var(--color-ink); }
+    .rank-count { font-weight: 700; color: var(--color-orange-deep); background: var(--color-orange-tint); padding: 2px 9px; border-radius: 999px; font-size: 0.78rem; }
+    .empty { color: var(--color-ink-soft); font-size: 0.85rem; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--color-line); }
+    th { color: var(--color-ink-soft); font-weight: 600; text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.04em; }
+    .type-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 700; background: var(--color-green-tint); color: var(--color-green); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>OrientCI — Tableau de bord</h1>
+    <a href="/admin/logout">Se déconnecter</a>
+  </header>
+
+  <main>
+    <div class="stat-row">
+      <div class="stat-card"><strong id="s-total">–</strong><span>Visites totales</span></div>
+      <div class="stat-card"><strong id="s-today">–</strong><span>Visites aujourd'hui</span></div>
+      <div class="stat-card"><strong id="s-unique">–</strong><span>Visiteurs uniques (estim.)</span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Visites — 14 derniers jours</h2>
+      <canvas id="chart-visits" height="80"></canvas>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel">
+        <h2>Filières les plus consultées</h2>
+        <div class="rank-list" id="rank-schools"></div>
+      </div>
+      <div class="panel">
+        <h2>Recherches les plus fréquentes</h2>
+        <div class="rank-list" id="rank-searches"></div>
+      </div>
+      <div class="panel">
+        <h2>Villes les plus filtrées</h2>
+        <div class="rank-list" id="rank-cities"></div>
+      </div>
+      <div class="panel">
+        <h2>Bourses les plus cliquées</h2>
+        <div class="rank-list" id="rank-scholarships"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Activité récente</h2>
+      <table>
+        <thead><tr><th>Type</th><th>Détail</th><th>Page</th><th>Horodatage (UTC)</th></tr></thead>
+        <tbody id="recent-body"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <script>
+    function renderRankList(containerId, items) {
+      const el = document.getElementById(containerId);
+      if (!items || !items.length) { el.innerHTML = '<p class="empty">Pas encore de données.</p>'; return; }
+      el.innerHTML = items.map(i => `
+        <div class="rank-row">
+          <span class="rank-label">${i.label}</span>
+          <span class="rank-count">${i.count}</span>
+        </div>
+      `).join("");
+    }
+
+    fetch("/admin/api/stats").then(r => r.json()).then(data => {
+      document.getElementById("s-total").textContent = data.total_visits;
+      document.getElementById("s-today").textContent = data.visits_today;
+      document.getElementById("s-unique").textContent = data.unique_visitors;
+
+      renderRankList("rank-schools", data.top_schools);
+      renderRankList("rank-searches", data.top_searches);
+      renderRankList("rank-cities", data.top_city_filters);
+      renderRankList("rank-scholarships", data.top_scholarships);
+
+      const ctx = document.getElementById("chart-visits");
+      new Chart(ctx, {
+        type: "bar",
+        data: {
+          labels: data.daily_visits.map(d => d.date.slice(5)),
+          datasets: [{
+            label: "Visites",
+            data: data.daily_visits.map(d => d.count),
+            backgroundColor: "#E85D0A",
+            borderRadius: 6,
+            maxBarThickness: 28
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } },
+          scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
+        }
+      });
+
+      const tbody = document.getElementById("recent-body");
+      tbody.innerHTML = data.recent_events.length
+        ? data.recent_events.map(e => `
+            <tr>
+              <td><span class="type-pill">${e.type}</span></td>
+              <td>${e.label || e.value || "—"}</td>
+              <td>${e.path || "—"}</td>
+              <td>${e.created_at.replace("T", " ").slice(0, 19)}</td>
+            </tr>
+          `).join("")
+        : '<tr><td colspan="4" class="empty">Aucun évènement pour le moment.</td></tr>';
+    });
+  </script>
+</body>
+</html>
