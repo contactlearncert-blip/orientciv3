@@ -2,9 +2,9 @@
 OrientCI — backend Flask
 =========================
 Sert le site statique (templates/index.html + static/), enregistre les
-évènements de trafic envoyés par script.js dans une base SQLite, et expose
-une page d'administration protégée par mot de passe pour consulter les
-statistiques (visites, filières consultées, recherches, bourses cliquées).
+évènements de trafic envoyés par script.js dans une base PostgreSQL (Neon),
+et expose une page d'administration protégée par mot de passe pour consulter
+les statistiques (visites, filières consultées, recherches, bourses cliquées).
 
 Lancement local :
     pip install -r requirements.txt
@@ -20,15 +20,29 @@ SECRET_KEY (voir README.md).
 """
 
 import os
-import sqlite3
 import hashlib
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 
+from dotenv import load_dotenv
 from flask import Flask, request, jsonify, session, redirect, url_for, render_template, g
+from sqlalchemy import create_engine, text
+
+# Charger les variables d'environnement depuis .env (si présent)
+load_dotenv()
+
+# Base de données PostgreSQL via Neon
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("La variable d'environnement DATABASE_URL n'est pas définie.")
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    future=True
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "orientci.db")
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "orientci-dev-secret-change-me")
@@ -41,39 +55,24 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "orientci2026")
 # Base de données
 # ---------------------------------------------------------------------------
 
-def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-    return g.db
-
-
-@app.teardown_appcontext
-def close_db(exception=None):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
-
-
 def init_db():
-    db = sqlite3.connect(DB_PATH)
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT NOT NULL,
-            label TEXT,
-            value TEXT,
-            path TEXT,
-            ip_hash TEXT,
-            user_agent TEXT,
-            referrer TEXT,
-            created_at TEXT NOT NULL
+    """Crée la table events si elle n'existe pas."""
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                CREATE TABLE IF NOT EXISTS events (
+                    id SERIAL PRIMARY KEY,
+                    type TEXT NOT NULL,
+                    label TEXT,
+                    value TEXT,
+                    path TEXT,
+                    ip_hash TEXT,
+                    user_agent TEXT,
+                    referrer TEXT,
+                    created_at TIMESTAMPTZ NOT NULL
+                )
+            """)
         )
-        """
-    )
-    db.commit()
-    db.close()
 
 
 def hash_ip(ip):
@@ -115,22 +114,23 @@ def track():
     value = str(data.get("value", ""))[:200]
     path = str(data.get("path", ""))[:200]
 
-    db = get_db()
-    db.execute(
-        "INSERT INTO events (type, label, value, path, ip_hash, user_agent, referrer, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            event_type,
-            label,
-            value,
-            path,
-            hash_ip(request.remote_addr),
-            request.headers.get("User-Agent", "")[:250],
-            request.headers.get("Referer", "")[:250],
-            datetime.now(timezone.utc).isoformat(),
-        ),
-    )
-    db.commit()
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO events (type, label, value, path, ip_hash, user_agent, referrer, created_at)
+                VALUES (:type, :label, :value, :path, :ip_hash, :user_agent, :referrer, :created_at)
+            """),
+            {
+                "type": event_type,
+                "label": label,
+                "value": value,
+                "path": path,
+                "ip_hash": hash_ip(request.remote_addr),
+                "user_agent": request.headers.get("User-Agent", "")[:250],
+                "referrer": request.headers.get("Referer", "")[:250],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
     return jsonify({"ok": True}), 204
 
 
@@ -166,43 +166,55 @@ def admin_dashboard():
 @app.route("/admin/api/stats")
 @login_required
 def admin_stats():
-    db = get_db()
     today = datetime.now(timezone.utc).date()
 
-    total_visits = db.execute(
-        "SELECT COUNT(*) AS c FROM events WHERE type = 'pageview'"
-    ).fetchone()["c"]
-
-    visits_today = db.execute(
-        "SELECT COUNT(*) AS c FROM events WHERE type = 'pageview' AND substr(created_at,1,10) = ?",
-        (today.isoformat(),),
-    ).fetchone()["c"]
-
-    unique_visitors = db.execute(
-        "SELECT COUNT(DISTINCT ip_hash) AS c FROM events WHERE type = 'pageview'"
-    ).fetchone()["c"]
-
-    # Visites des 14 derniers jours (pour le graphique)
-    days = []
-    for i in range(13, -1, -1):
-        d = (today - timedelta(days=i)).isoformat()
-        count = db.execute(
-            "SELECT COUNT(*) AS c FROM events WHERE type = 'pageview' AND substr(created_at,1,10) = ?",
-            (d,),
+    with engine.connect() as conn:
+        total_visits = conn.execute(
+            text("SELECT COUNT(*) AS c FROM events WHERE type = 'pageview'")
         ).fetchone()["c"]
-        days.append({"date": d, "count": count})
 
-    def top(event_type, limit=8):
-        rows = db.execute(
-            "SELECT label, COUNT(*) AS c FROM events WHERE type = ? AND label != '' "
-            "GROUP BY label ORDER BY c DESC LIMIT ?",
-            (event_type, limit),
+        visits_today = conn.execute(
+            text("SELECT COUNT(*) AS c FROM events WHERE type = 'pageview' AND DATE(created_at) = :today"),
+            {"today": today.isoformat()}
+        ).fetchone()["c"]
+
+        unique_visitors = conn.execute(
+            text("SELECT COUNT(DISTINCT ip_hash) AS c FROM events WHERE type = 'pageview'")
+        ).fetchone()["c"]
+
+        # Visites des 14 derniers jours (pour le graphique)
+        days = []
+        for i in range(13, -1, -1):
+            d = (today - timedelta(days=i)).isoformat()
+            count = conn.execute(
+                text("SELECT COUNT(*) AS c FROM events WHERE type = 'pageview' AND DATE(created_at) = :day"),
+                {"day": d}
+            ).fetchone()["c"]
+            days.append({"date": d, "count": count})
+
+        def top(event_type, limit=8):
+            rows = conn.execute(
+                text("""
+                    SELECT label, COUNT(*) AS c
+                    FROM events
+                    WHERE type = :event_type AND label != ''
+                    GROUP BY label
+                    ORDER BY c DESC
+                    LIMIT :limit
+                """),
+                {"event_type": event_type, "limit": limit}
+            ).fetchall()
+            return [{"label": r["label"], "count": r["c"]} for r in rows]
+
+        recent_rows = conn.execute(
+            text("""
+                SELECT type, label, value, path, created_at
+                FROM events
+                ORDER BY id DESC
+                LIMIT 30
+            """)
         ).fetchall()
-        return [{"label": r["label"], "count": r["c"]} for r in rows]
-
-    recent = db.execute(
-        "SELECT type, label, value, path, created_at FROM events ORDER BY id DESC LIMIT 30"
-    ).fetchall()
+        recent = [dict(r._mapping) for r in recent_rows]
 
     return jsonify({
         "total_visits": total_visits,
@@ -214,7 +226,7 @@ def admin_stats():
         "top_searches": top("search"),
         "top_city_filters": top("city_filter"),
         "top_scholarships": top("scholarship_click"),
-        "recent_events": [dict(r) for r in recent],
+        "recent_events": recent,
     })
 
 
